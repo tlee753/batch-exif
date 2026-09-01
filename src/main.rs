@@ -1,5 +1,5 @@
-use iced::widget::{Space, button, column, row, text, text_input};
-use iced::{Alignment, Element, Task};
+use iced::widget::{button, column, container, image, row, scrollable, text, text_input, Space};
+use iced::{Alignment, Element, Length, Task};
 use little_exif::exif_tag::ExifTag;
 use little_exif::metadata::Metadata;
 use little_exif::rational::uR64;
@@ -8,12 +8,15 @@ use std::path::PathBuf;
 
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("EXIF Batch Updater")
+        .title("Genealogy EXIF Batch Manager - v2.0")
         .run()
 }
 
 struct ExifApp {
     folder_path: Option<PathBuf>,
+    file_list: Vec<PathBuf>,
+    selected_file: Option<PathBuf>,
+    // Metadata Fields
     date_str: String,
     time_str: String,
     latitude_str: String,
@@ -25,6 +28,7 @@ struct ExifApp {
 enum Message {
     SelectFolder,
     FolderSelected(Option<PathBuf>),
+    SelectFile(PathBuf),
     DateChanged(String),
     TimeChanged(String),
     LatitudeChanged(String),
@@ -36,11 +40,13 @@ impl Default for ExifApp {
     fn default() -> Self {
         Self {
             folder_path: None,
-            date_str: "2026:09:01".to_string(),
+            file_list: Vec::new(),
+            selected_file: None,
+            date_str: "1920:06:15".to_string(),
             time_str: "12:00:00".to_string(),
             latitude_str: "33.9519".to_string(),
             longitude_str: "-83.3576".to_string(),
-            status: "Select a folder to begin.".to_string(),
+            status: "Select a folder to load family archive photos.".to_string(),
         }
     }
 }
@@ -54,9 +60,31 @@ impl ExifApp {
             }),
             Message::FolderSelected(path) => {
                 if let Some(p) = path {
-                    self.status = format!("Selected: {}", p.display());
-                    self.folder_path = Some(p);
+                    self.status = format!("Loaded folder: {}", p.display());
+                    self.folder_path = Some(p.clone());
+                    self.file_list.clear();
+                    self.selected_file = None;
+
+                    if let Ok(entries) = fs::read_dir(p) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if let Some(ext) = path.extension() {
+                                let ext_str = ext.to_string_lossy().to_lowercase();
+                                if ext_str == "jpg" || ext_str == "jpeg" || ext_str == "png" {
+                                    self.file_list.push(path);
+                                }
+                            }
+                        }
+                    }
+                    self.file_list.sort();
+                    if let Some(first) = self.file_list.first().cloned() {
+                        self.selected_file = Some(first);
+                    }
                 }
+                Task::none()
+            }
+            Message::SelectFile(file_path) => {
+                self.selected_file = Some(file_path);
                 Task::none()
             }
             Message::DateChanged(val) => {
@@ -92,91 +120,143 @@ impl ExifApp {
                 let lon_deg = decimal_to_dms_rationals(lon.abs());
 
                 let mut count = 0;
-                if let Ok(entries) = fs::read_dir(folder) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if let Some(ext) = path.extension() {
-                            let ext_str = ext.to_string_lossy().to_lowercase();
-                            if ext_str == "jpg" || ext_str == "jpeg" || ext_str == "png" {
-                                let mut metadata = Metadata::new();
+                for path in &self.file_list {
+                    let mut metadata = Metadata::new();
+                    metadata.set_tag(ExifTag::DateTimeOriginal(datetime_exif.clone()));
+                    metadata.set_tag(ExifTag::GPSLatitude(lat_deg.clone()));
+                    metadata.set_tag(ExifTag::GPSLatitudeRef(lat_ref.to_string()));
+                    metadata.set_tag(ExifTag::GPSLongitude(lon_deg.clone()));
+                    metadata.set_tag(ExifTag::GPSLongitudeRef(lon_ref.to_string()));
 
-                                metadata.set_tag(ExifTag::DateTimeOriginal(datetime_exif.clone()));
-                                metadata.set_tag(ExifTag::GPSLatitude(lat_deg.clone()));
-                                metadata.set_tag(ExifTag::GPSLatitudeRef(lat_ref.to_string()));
-                                metadata.set_tag(ExifTag::GPSLongitude(lon_deg.clone()));
-                                metadata.set_tag(ExifTag::GPSLongitudeRef(lon_ref.to_string()));
-
-                                if metadata.write_to_file(&path).is_ok() {
-                                    count += 1;
-                                }
-                            }
-                        }
+                    if metadata.write_to_file(path).is_ok() {
+                        count += 1;
                     }
                 }
 
-                self.status = format!("Updated EXIF data for {} files.", count);
+                self.status = format!("Batch updated metadata for {} archive photos.", count);
                 Task::none()
             }
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let folder_label = match &self.folder_path {
-            Some(p) => p.to_string_lossy().to_string(),
-            None => "No folder selected".to_string(),
-        };
-
-        let folder_row = row![
-            button("Choose Folder").on_press(Message::SelectFolder),
-            text(folder_label),
+        // --- COLUMN 1: File Explorer Panel ---
+        let mut file_column = column![
+            button("Open Archive Directory").on_press(Message::SelectFolder),
+            Space::new().height(10),
+            text(format!("Files found: {}", self.file_list.len())).size(12),
+            Space::new().height(10),
         ]
-        .spacing(10)
-        .align_y(Alignment::Center);
+        .spacing(5);
 
+        for file in &self.file_list {
+            let file_name = file
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            let is_selected = self.selected_file.as_ref() == Some(file);
+            let label = if is_selected {
+                format!("▶ {}", file_name)
+            } else {
+                format!("  {}", file_name)
+            };
+
+            file_column = file_column.push(
+                button(text(label).size(13))
+                    .on_press(Message::SelectFile(file.clone()))
+                    .width(Length::Fill),
+            );
+        }
+
+        let explorer_panel = container(scrollable(file_column))
+            .width(240)
+            .height(Length::Fill)
+            .padding(10);
+
+        // --- COLUMN 2: Genealogy EXIF Metadata Editor Panel ---
         let date_input = row![
-            text("Date (YYYY:MM:DD):").width(150),
+            text("Date:").width(90),
             text_input("YYYY:MM:DD", &self.date_str).on_input(Message::DateChanged),
         ]
         .spacing(10);
 
         let time_input = row![
-            text("Time (HH:MM:SS):").width(150),
+            text("Time:").width(90),
             text_input("HH:MM:SS", &self.time_str).on_input(Message::TimeChanged),
         ]
         .spacing(10);
 
         let lat_input = row![
-            text("Latitude (decimal):").width(150),
+            text("Latitude:").width(90),
             text_input("e.g. 33.9519", &self.latitude_str).on_input(Message::LatitudeChanged),
         ]
         .spacing(10);
 
         let lon_input = row![
-            text("Longitude (decimal):").width(150),
+            text("Longitude:").width(90),
             text_input("e.g. -83.3576", &self.longitude_str).on_input(Message::LongitudeChanged),
         ]
         .spacing(10);
 
-        let apply_btn = button("Batch Apply EXIF Updates")
+        let apply_btn = button("Batch Write EXIF Data")
             .on_press(Message::ApplyChanges)
             .padding(10);
 
-        column![
-            text("Batch Photo EXIF Editor").size(24),
-            Space::new().height(10),
-            folder_row,
-            Space::new().height(10),
-            date_input,
-            time_input,
-            lat_input,
-            lon_input,
-            Space::new().height(15),
-            apply_btn,
-            Space::new().height(15),
-            text(&self.status),
+        let editor_panel = container(
+            column![
+                text("Genealogy EXIF Attributes").size(18),
+                Space::new().height(10),
+                date_input,
+                time_input,
+                lat_input,
+                lon_input,
+                Space::new().height(15),
+                apply_btn,
+                Space::new().height(15),
+                text(&self.status).size(12),
+            ]
+            .spacing(10),
+        )
+        .width(320)
+        .height(Length::Fill)
+        .padding(10);
+
+        // --- COLUMN 3: Dynamic Image Preview Panel ---
+        let preview_content: Element<Message> = match &self.selected_file {
+            Some(path) => container(
+                column![
+                    text(format!("Preview: {}", path.file_name().unwrap().to_string_lossy())).size(14),
+                    Space::new().height(10),
+                    image(path.to_string_lossy().to_string())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                ]
+                .align_x(Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into(),
+            None => container(text("Select a photo from the left menu to preview").size(14))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
+                .into(),
+        };
+
+        // Main 3-Column Root Layout
+        row![
+            explorer_panel,
+            container(Space::new().width(1)).height(Length::Fill), // Separator spacer
+            editor_panel,
+            container(Space::new().width(1)).height(Length::Fill), // Separator spacer
+            preview_content,
         ]
-        .padding(20)
         .spacing(10)
+        .padding(10)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
     }
 }
