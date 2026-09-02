@@ -1,6 +1,7 @@
 # batch-exif
 Batch Exif Offline Editor in Rust/Iced
-# Genealogical EXIF & Companion Metadata Reference
+
+### Genealogical EXIF & Companion Metadata Reference
 
 | Variable | Description |
 | :--- | :--- |
@@ -20,3 +21,13 @@ Batch Exif Offline Editor in Rust/Iced
 | **XMP-mwg-rs:Regions** | Bounding box coordinates used to identify and map specific facial regions. |
 | **IPTC:PersonInImage** | List of individual names corresponding to the people appearing in the photo. |
 | **IPTC:Credit / IPTC:Byline** | The photographer, original collector, or contributor who provided the photograph. |
+
+### Arch Windows Cross Compilation
+```bash
+sudo pacman -S mingw-w64-gcc
+rustup target add x86_64-pc-windows-gnu
+```
+```bash
+cargo build --release --target x86_64-pc-windows-gnu
+ls target/x86_64-pc-windows-gnu/release/batch-exif.exe
+```
