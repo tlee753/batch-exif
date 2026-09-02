@@ -10,11 +10,13 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-// Include the Lexend TTF font bytes relative to src directory
-const LEXEND_FONT_BYTES: &[u8] = include_bytes!("lexend.ttf");
+// Include both static TTF files using your exact lowercase filenames
+const LEXEND_REGULAR_BYTES: &[u8] = include_bytes!("lexend-regular.ttf");
+const LEXEND_BOLD_BYTES: &[u8] = include_bytes!("lexend-bold.ttf");
+
 const LEXEND_FONT_NAME: &str = "Lexend";
 
-// Font configurations
+// Font configurations targeting the same registered family name
 const LEXEND_REGULAR: Font = Font {
     family: font::Family::Name(LEXEND_FONT_NAME),
     weight: font::Weight::Normal,
@@ -33,7 +35,14 @@ pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
         .title("EXIF Batch Tool v2.1")
         .theme(|_: &ExifApp| Theme::Dark)
-        .font(LEXEND_FONT_BYTES)
+        .font(LEXEND_REGULAR_BYTES) // Register Regular variant into font database
+        .font(LEXEND_BOLD_BYTES) // Register Bold variant into font database
+        .default_font(LEXEND_REGULAR)
+        .window(iced::window::Settings {
+            size: iced::Size::new(1600.0, 900.0),
+            min_size: Some(iced::Size::new(1000.0, 600.0)),
+            ..Default::default()
+        })
         .run()
 }
 
@@ -62,9 +71,7 @@ struct ExifApp {
     folder_path: Option<PathBuf>,
     file_list: Vec<PathBuf>,
     selected_files: HashSet<PathBuf>,
-
     fields: ExifFields,
-
     status: String,
 }
 
@@ -766,7 +773,7 @@ impl ExifApp {
                     text(file_name)
                         .font(LEXEND_REGULAR)
                         .size(14)
-                        .width(Length::Fill) // Fill the explicit width constraint of container
+                        .width(Length::Fill)
                         .wrapping(iced::widget::text::Wrapping::Word)
                         .color(if is_selected {
                             Color::BLACK
@@ -774,7 +781,7 @@ impl ExifApp {
                             Color::WHITE
                         }),
                 )
-                .width(Length::Fixed(204.0)) // Constrain width to force multi-line text wrapping
+                .width(Length::Fixed(204.0))
                 .padding(iced::Padding {
                     top: 6.0,
                     bottom: 6.0,
@@ -970,7 +977,7 @@ impl ExifApp {
         let primary_selected = self
             .file_list
             .iter()
-            .find(|p| self.selected_files.contains(*p));
+            .rfind(|p| self.selected_files.contains(*p));
 
         let preview_content: Element<Message> = match primary_selected {
             Some(path) => container(
