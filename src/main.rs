@@ -29,7 +29,7 @@ const LEXEND_BOLD: Font = Font {
 
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("EXIF Batch Manager - v2.0")
+        .title("EXIF Batch Tool v2.1")
         .theme(|_: &ExifApp| Theme::Dark)
         .font(LEXEND_FONT_BYTES)
         .run()
