@@ -1,43 +1,71 @@
-use iced::widget::{Space, button, column, container, image, row, scrollable, text, text_input};
-use iced::{Alignment, Element, Length, Task};
+use iced::font::{self, Font};
+use iced::widget::{
+    button, column, container, image, row, scrollable, text, text_input, Space,
+};
+use iced::{
+    Color, Element, Length, Task, Theme,
+};
 use little_exif::exif_tag::ExifTag;
 use little_exif::metadata::Metadata;
 use little_exif::rational::uR64;
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
+// Include the Lexend TTF font bytes relative to src directory
+const LEXEND_FONT_BYTES: &[u8] = include_bytes!("lexend.ttf");
+const LEXEND_FONT_NAME: &str = "Lexend";
+
+// Font configurations
+const LEXEND_REGULAR: Font = Font {
+    family: font::Family::Name(LEXEND_FONT_NAME),
+    weight: font::Weight::Normal,
+    stretch: font::Stretch::Normal,
+    style: font::Style::Normal,
+};
+
+const LEXEND_BOLD: Font = Font {
+    family: font::Family::Name(LEXEND_FONT_NAME),
+    weight: font::Weight::Bold,
+    stretch: font::Stretch::Normal,
+    style: font::Style::Normal,
+};
+
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("Genealogy EXIF Batch Manager - v2.0")
+        .title("EXIF Batch Manager - v2.0")
+        .theme(|_: &ExifApp| Theme::Dark)
+        .font(LEXEND_FONT_BYTES)
         .run()
 }
 
-struct ExifApp {
-    folder_path: Option<PathBuf>,
-    file_list: Vec<PathBuf>,
-    selected_file: Option<PathBuf>,
-
-    // Temporal Metadata
+#[derive(Default, Clone, PartialEq, Eq)]
+struct ExifFields {
     date_str: String,
     time_str: String,
     digitized_date_str: String,
     offset_time_str: String,
 
-    // Location (GPS) Metadata
     latitude_str: String,
     longitude_str: String,
     altitude_str: String,
 
-    // Descriptive Location Metadata
     city_str: String,
     state_str: String,
     country_str: String,
     sublocation_str: String,
 
-    // Biographical & Archival Metadata
     caption_str: String,
     people_str: String,
     credit_str: String,
+}
+
+struct ExifApp {
+    folder_path: Option<PathBuf>,
+    file_list: Vec<PathBuf>,
+    selected_files: HashSet<PathBuf>,
+
+    fields: ExifFields,
 
     status: String,
 }
@@ -46,7 +74,9 @@ struct ExifApp {
 enum Message {
     SelectFolder,
     FolderSelected(Option<PathBuf>),
-    SelectFile(PathBuf),
+    ToggleFileSelection(PathBuf),
+    SelectAllFiles,
+    DeselectAllFiles,
 
     // Form Input Messages
     DateChanged(String),
@@ -72,32 +102,149 @@ impl Default for ExifApp {
         Self {
             folder_path: None,
             file_list: Vec::new(),
-            selected_file: None,
-
-            date_str: "1920:06:15".to_string(),
-            time_str: "12:00:00".to_string(),
-            digitized_date_str: "2026:01:10".to_string(),
-            offset_time_str: "-05:00".to_string(),
-
-            latitude_str: "33.9519".to_string(),
-            longitude_str: "-83.3576".to_string(),
-            altitude_str: "200".to_string(),
-
-            city_str: "Athens".to_string(),
-            state_str: "Georgia".to_string(),
-            country_str: "United States".to_string(),
-            sublocation_str: "Family Homestead, 124 Main St".to_string(),
-
-            caption_str: "Family gathering on the porch during summer.".to_string(),
-            people_str: "John Doe, Mary Doe, James Smith".to_string(),
-            credit_str: "Doe Family Archives".to_string(),
-
-            status: "Select a folder to load family archive photos.".to_string(),
+            selected_files: HashSet::new(),
+            fields: ExifFields::default(),
+            status: "Select a folder to load archive photos.".to_string(),
         }
     }
 }
 
 impl ExifApp {
+    fn extract_fields_from_path(path: &PathBuf) -> ExifFields {
+        let mut fields = ExifFields::default();
+
+        if let Ok(metadata) = Metadata::new_from_path(path) {
+            // Original Date & Time
+            if let Some(ExifTag::DateTimeOriginal(val)) = metadata.get_tag(&ExifTag::DateTimeOriginal(String::new())).next() {
+                let parts: Vec<&str> = val.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    fields.date_str = parts[0].to_string();
+                    fields.time_str = parts[1].to_string();
+                } else {
+                    fields.date_str = val.clone();
+                }
+            }
+
+            // Digitized / Create Date
+            if let Some(ExifTag::CreateDate(val)) = metadata.get_tag(&ExifTag::CreateDate(String::new())).next() {
+                fields.digitized_date_str = val.clone();
+            }
+
+            // Timezone Offset
+            if let Some(ExifTag::OffsetTimeOriginal(val)) = metadata.get_tag(&ExifTag::OffsetTimeOriginal(String::new())).next() {
+                fields.offset_time_str = val.clone();
+            }
+
+            // Latitude
+            if let Some(ExifTag::GPSLatitude(rats)) = metadata.get_tag(&ExifTag::GPSLatitude(Vec::new())).next() {
+                if rats.len() >= 3 {
+                    let deg = rats[0].nominator as f64 / rats[0].denominator as f64;
+                    let min = rats[1].nominator as f64 / rats[1].denominator as f64;
+                    let sec = rats[2].nominator as f64 / rats[2].denominator as f64;
+                    let mut lat = deg + (min / 60.0) + (sec / 3600.0);
+
+                    if let Some(ExifTag::GPSLatitudeRef(ref_str)) = metadata.get_tag(&ExifTag::GPSLatitudeRef(String::new())).next() {
+                        if ref_str == "S" {
+                            lat = -lat;
+                        }
+                    }
+                    fields.latitude_str = format!("{:.6}", lat);
+                }
+            }
+
+            // Longitude
+            if let Some(ExifTag::GPSLongitude(rats)) = metadata.get_tag(&ExifTag::GPSLongitude(Vec::new())).next() {
+                if rats.len() >= 3 {
+                    let deg = rats[0].nominator as f64 / rats[0].denominator as f64;
+                    let min = rats[1].nominator as f64 / rats[1].denominator as f64;
+                    let sec = rats[2].nominator as f64 / rats[2].denominator as f64;
+                    let mut lon = deg + (min / 60.0) + (sec / 3600.0);
+
+                    if let Some(ExifTag::GPSLongitudeRef(ref_str)) = metadata.get_tag(&ExifTag::GPSLongitudeRef(String::new())).next() {
+                        if ref_str == "W" {
+                            lon = -lon;
+                        }
+                    }
+                    fields.longitude_str = format!("{:.6}", lon);
+                }
+            }
+
+            // Altitude
+            if let Some(ExifTag::GPSAltitude(rats)) = metadata.get_tag(&ExifTag::GPSAltitude(Vec::new())).next() {
+                if let Some(alt) = rats.first() {
+                    if alt.denominator != 0 {
+                        fields.altitude_str = (alt.nominator / alt.denominator).to_string();
+                    }
+                }
+            }
+
+            // Description / Caption
+            if let Some(ExifTag::ImageDescription(val)) = metadata.get_tag(&ExifTag::ImageDescription(String::new())).next() {
+                fields.caption_str = val.clone();
+            }
+
+            // Photographer / Credit
+            if let Some(ExifTag::Artist(val)) = metadata.get_tag(&ExifTag::Artist(String::new())).next() {
+                fields.credit_str = val.clone();
+            }
+
+            // Location Metadata
+            if let Some(ExifTag::Software(val)) = metadata.get_tag(&ExifTag::Software(String::new())).next() {
+                let parts: Vec<&str> = val.split('|').collect();
+                if parts.len() == 4 {
+                    fields.city_str = parts[0].to_string();
+                    fields.state_str = parts[1].to_string();
+                    fields.country_str = parts[2].to_string();
+                    fields.sublocation_str = parts[3].to_string();
+                }
+            }
+
+            if let Some(ExifTag::UserComment(val)) = metadata.get_tag(&ExifTag::UserComment(Vec::new())).next() {
+                if let Ok(s) = String::from_utf8(val.clone()) {
+                    fields.people_str = s.trim_start_matches("ASCII\0\0\0").to_string();
+                }
+            }
+        }
+
+        fields
+    }
+
+    fn update_fields_from_selection(&mut self) {
+        if self.selected_files.is_empty() {
+            self.fields = ExifFields::default();
+            return;
+        }
+
+        let mut iter = self.selected_files.iter();
+        if let Some(first_path) = iter.next() {
+            let mut common = Self::extract_fields_from_path(first_path);
+
+            for path in iter {
+                let current = Self::extract_fields_from_path(path);
+
+                if common.date_str != current.date_str { common.date_str.clear(); }
+                if common.time_str != current.time_str { common.time_str.clear(); }
+                if common.digitized_date_str != current.digitized_date_str { common.digitized_date_str.clear(); }
+                if common.offset_time_str != current.offset_time_str { common.offset_time_str.clear(); }
+
+                if common.latitude_str != current.latitude_str { common.latitude_str.clear(); }
+                if common.longitude_str != current.longitude_str { common.longitude_str.clear(); }
+                if common.altitude_str != current.altitude_str { common.altitude_str.clear(); }
+
+                if common.city_str != current.city_str { common.city_str.clear(); }
+                if common.state_str != current.state_str { common.state_str.clear(); }
+                if common.country_str != current.country_str { common.country_str.clear(); }
+                if common.sublocation_str != current.sublocation_str { common.sublocation_str.clear(); }
+
+                if common.caption_str != current.caption_str { common.caption_str.clear(); }
+                if common.people_str != current.people_str { common.people_str.clear(); }
+                if common.credit_str != current.credit_str { common.credit_str.clear(); }
+            }
+
+            self.fields = common;
+        }
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::SelectFolder => Task::future(async {
@@ -109,7 +256,7 @@ impl ExifApp {
                     self.status = format!("Loaded folder: {}", p.display());
                     self.folder_path = Some(p.clone());
                     self.file_list.clear();
-                    self.selected_file = None;
+                    self.selected_files.clear();
 
                     if let Ok(entries) = fs::read_dir(p) {
                         for entry in entries.flatten() {
@@ -124,71 +271,87 @@ impl ExifApp {
                     }
                     self.file_list.sort();
                     if let Some(first) = self.file_list.first().cloned() {
-                        self.selected_file = Some(first);
+                        self.selected_files.insert(first);
                     }
+                    self.update_fields_from_selection();
                 }
                 Task::none()
             }
-            Message::SelectFile(file_path) => {
-                self.selected_file = Some(file_path);
+            Message::ToggleFileSelection(file_path) => {
+                if self.selected_files.contains(&file_path) {
+                    self.selected_files.remove(&file_path);
+                } else {
+                    self.selected_files.insert(file_path);
+                }
+
+                self.update_fields_from_selection();
+                Task::none()
+            }
+            Message::SelectAllFiles => {
+                self.selected_files = self.file_list.iter().cloned().collect();
+                self.update_fields_from_selection();
+                Task::none()
+            }
+            Message::DeselectAllFiles => {
+                self.selected_files.clear();
+                self.update_fields_from_selection();
                 Task::none()
             }
 
-            // Input handlers
             Message::DateChanged(val) => {
-                self.date_str = val;
+                self.fields.date_str = val;
                 Task::none()
             }
             Message::TimeChanged(val) => {
-                self.time_str = val;
+                self.fields.time_str = val;
                 Task::none()
             }
             Message::DigitizedDateChanged(val) => {
-                self.digitized_date_str = val;
+                self.fields.digitized_date_str = val;
                 Task::none()
             }
             Message::OffsetTimeChanged(val) => {
-                self.offset_time_str = val;
+                self.fields.offset_time_str = val;
                 Task::none()
             }
             Message::LatitudeChanged(val) => {
-                self.latitude_str = val;
+                self.fields.latitude_str = val;
                 Task::none()
             }
             Message::LongitudeChanged(val) => {
-                self.longitude_str = val;
+                self.fields.longitude_str = val;
                 Task::none()
             }
             Message::AltitudeChanged(val) => {
-                self.altitude_str = val;
+                self.fields.altitude_str = val;
                 Task::none()
             }
             Message::CityChanged(val) => {
-                self.city_str = val;
+                self.fields.city_str = val;
                 Task::none()
             }
             Message::StateChanged(val) => {
-                self.state_str = val;
+                self.fields.state_str = val;
                 Task::none()
             }
             Message::CountryChanged(val) => {
-                self.country_str = val;
+                self.fields.country_str = val;
                 Task::none()
             }
             Message::SublocationChanged(val) => {
-                self.sublocation_str = val;
+                self.fields.sublocation_str = val;
                 Task::none()
             }
             Message::CaptionChanged(val) => {
-                self.caption_str = val;
+                self.fields.caption_str = val;
                 Task::none()
             }
             Message::PeopleChanged(val) => {
-                self.people_str = val;
+                self.fields.people_str = val;
                 Task::none()
             }
             Message::CreditChanged(val) => {
-                self.credit_str = val;
+                self.fields.credit_str = val;
                 Task::none()
             }
 
@@ -198,57 +361,265 @@ impl ExifApp {
                     return Task::none();
                 }
 
-                let datetime_exif = format!("{} {}", self.date_str, self.time_str);
-                let lat: f64 = self.latitude_str.parse().unwrap_or(0.0);
-                let lon: f64 = self.longitude_str.parse().unwrap_or(0.0);
-                let alt: u32 = self.altitude_str.parse().unwrap_or(0);
+                if self.selected_files.is_empty() {
+                    self.status = "Error: No target files selected to apply changes!".to_string();
+                    return Task::none();
+                }
 
-                let lat_ref = if lat >= 0.0 { "N" } else { "S" };
-                let lon_ref = if lon >= 0.0 { "E" } else { "W" };
+                let lat_opt: Option<f64> = self.fields.latitude_str.trim().parse().ok();
+                let lon_opt: Option<f64> = self.fields.longitude_str.trim().parse().ok();
+                let alt_opt: Option<u32> = self.fields.altitude_str.trim().parse().ok();
 
-                let lat_deg = decimal_to_dms_rationals(lat.abs());
-                let lon_deg = decimal_to_dms_rationals(lon.abs());
-                let alt_rat = vec![uR64 {
-                    nominator: alt,
-                    denominator: 1,
-                }];
+                let mut success_count = 0;
+                let mut error_count = 0;
 
-                let mut count = 0;
-                for path in &self.file_list {
-                    let mut metadata = Metadata::new();
+                for path in &self.selected_files {
+                    let mut metadata = Metadata::new_from_path(path).unwrap_or_else(|_| Metadata::new());
 
-                    // Standard EXIF Metadata
-                    metadata.set_tag(ExifTag::DateTimeOriginal(datetime_exif.clone()));
-                    metadata.set_tag(ExifTag::CreateDate(self.digitized_date_str.clone()));
-                    metadata.set_tag(ExifTag::OffsetTimeOriginal(self.offset_time_str.clone()));
-                    metadata.set_tag(ExifTag::GPSLatitude(lat_deg.clone()));
-                    metadata.set_tag(ExifTag::GPSLatitudeRef(lat_ref.to_string()));
-                    metadata.set_tag(ExifTag::GPSLongitude(lon_deg.clone()));
-                    metadata.set_tag(ExifTag::GPSLongitudeRef(lon_ref.to_string()));
-                    metadata.set_tag(ExifTag::GPSAltitude(alt_rat.clone()));
-                    metadata.set_tag(ExifTag::GPSAltitudeRef(vec![0])); // 0 = Above Sea Level
+                    // --- Dates & Times ---
+                    if !self.fields.date_str.trim().is_empty() || !self.fields.time_str.trim().is_empty() {
+                        let mut curr_date = String::new();
+                        let mut curr_time = String::new();
+                        if let Some(ExifTag::DateTimeOriginal(val)) = metadata.get_tag(&ExifTag::DateTimeOriginal(String::new())).next() {
+                            let parts: Vec<&str> = val.split_whitespace().collect();
+                            if parts.len() >= 2 {
+                                curr_date = parts[0].to_string();
+                                curr_time = parts[1].to_string();
+                            } else {
+                                curr_date = val.clone();
+                            }
+                        }
 
-                    // Image/Archival Description
-                    metadata.set_tag(ExifTag::ImageDescription(self.caption_str.clone()));
-                    metadata.set_tag(ExifTag::Artist(self.credit_str.clone()));
+                        let new_date = if !self.fields.date_str.trim().is_empty() {
+                            self.fields.date_str.trim()
+                        } else {
+                            &curr_date
+                        };
 
-                    if metadata.write_to_file(path).is_ok() {
-                        count += 1;
+                        let new_time = if !self.fields.time_str.trim().is_empty() {
+                            self.fields.time_str.trim()
+                        } else {
+                            &curr_time
+                        };
+
+                        metadata.set_tag(ExifTag::DateTimeOriginal(format!("{} {}", new_date, new_time)));
+                    }
+
+                    if !self.fields.digitized_date_str.trim().is_empty() {
+                        metadata.set_tag(ExifTag::CreateDate(self.fields.digitized_date_str.trim().to_string()));
+                    }
+
+                    if !self.fields.offset_time_str.trim().is_empty() {
+                        metadata.set_tag(ExifTag::OffsetTimeOriginal(self.fields.offset_time_str.trim().to_string()));
+                    }
+
+                    // --- GPS Coordinates ---
+                    if let Some(lat) = lat_opt {
+                        let lat_ref = if lat >= 0.0 { "N" } else { "S" };
+                        metadata.set_tag(ExifTag::GPSLatitude(decimal_to_dms_rationals(lat.abs())));
+                        metadata.set_tag(ExifTag::GPSLatitudeRef(lat_ref.to_string()));
+                    }
+
+                    if let Some(lon) = lon_opt {
+                        let lon_ref = if lon >= 0.0 { "E" } else { "W" };
+                        metadata.set_tag(ExifTag::GPSLongitude(decimal_to_dms_rationals(lon.abs())));
+                        metadata.set_tag(ExifTag::GPSLongitudeRef(lon_ref.to_string()));
+                    }
+
+                    if let Some(alt) = alt_opt {
+                        let alt_rat = vec![uR64 { nominator: alt, denominator: 1 }];
+                        metadata.set_tag(ExifTag::GPSAltitude(alt_rat));
+                        metadata.set_tag(ExifTag::GPSAltitudeRef(vec![0]));
+                    }
+
+                    // --- Description & Photographer ---
+                    if !self.fields.caption_str.trim().is_empty() {
+                        metadata.set_tag(ExifTag::ImageDescription(self.fields.caption_str.trim().to_string()));
+                    }
+
+                    if !self.fields.credit_str.trim().is_empty() {
+                        metadata.set_tag(ExifTag::Artist(self.fields.credit_str.trim().to_string()));
+                    }
+
+                    // --- Selective Location Update ---
+                    let has_city = !self.fields.city_str.trim().is_empty();
+                    let has_state = !self.fields.state_str.trim().is_empty();
+                    let has_country = !self.fields.country_str.trim().is_empty();
+                    let has_sublocation = !self.fields.sublocation_str.trim().is_empty();
+
+                    if has_city || has_state || has_country || has_sublocation {
+                        let mut curr_city = String::new();
+                        let mut curr_state = String::new();
+                        let mut curr_country = String::new();
+                        let mut curr_sublocation = String::new();
+
+                        if let Some(ExifTag::Software(val)) = metadata.get_tag(&ExifTag::Software(String::new())).next() {
+                            let parts: Vec<&str> = val.split('|').collect();
+                            if parts.len() == 4 {
+                                curr_city = parts[0].to_string();
+                                curr_state = parts[1].to_string();
+                                curr_country = parts[2].to_string();
+                                curr_sublocation = parts[3].to_string();
+                            }
+                        }
+
+                        let final_city = if has_city { self.fields.city_str.trim() } else { &curr_city };
+                        let final_state = if has_state { self.fields.state_str.trim() } else { &curr_state };
+                        let final_country = if has_country { self.fields.country_str.trim() } else { &curr_country };
+                        let final_sublocation = if has_sublocation { self.fields.sublocation_str.trim() } else { &curr_sublocation };
+
+                        let loc_payload = format!(
+                            "{}|{}|{}|{}",
+                            final_city, final_state, final_country, final_sublocation
+                        );
+                        metadata.set_tag(ExifTag::Software(loc_payload));
+                    }
+
+                    // --- People Tag ---
+                    if !self.fields.people_str.trim().is_empty() {
+                        let mut comment_bytes = vec![0x41, 0x53, 0x43, 0x49, 0x49, 0x00, 0x00, 0x00];
+                        comment_bytes.extend(self.fields.people_str.trim().bytes());
+                        metadata.set_tag(ExifTag::UserComment(comment_bytes));
+                    }
+
+                    match metadata.write_to_file(path) {
+                        Ok(_) => success_count += 1,
+                        Err(e) => {
+                            eprintln!("Failed to write EXIF for {:?}: {:?}", path, e);
+                            error_count += 1;
+                        }
                     }
                 }
 
-                self.status = format!("Updated genealogy metadata for {} files.", count);
+                self.update_fields_from_selection();
+
+                if error_count > 0 {
+                    self.status = format!(
+                        "Updated {} file(s), failed on {} file(s).",
+                        success_count, error_count
+                    );
+                } else {
+                    self.status = format!("Successfully saved EXIF to {} file(s).", success_count);
+                }
+
                 Task::none()
             }
         }
     }
 
     fn view(&self) -> Element<'_, Message> {
+        let highlight_green = Color::from_rgb8(0x00, 0xFF, 0xAF);
+        let border_gray = Color::from_rgb8(0x33, 0x33, 0x33);
+
+        let txt = |content: String| text(content).font(LEXEND_REGULAR);
+        let txt_str = |content: &'static str| text(content).font(LEXEND_REGULAR);
+        
+        let bold_title = |label: &'static str| {
+            container(
+                text(label)
+                    .size(15)
+                    .color(highlight_green)
+                    .font(LEXEND_BOLD)
+            )
+            .width(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+        };
+
+        let white_button_style = |_theme: &Theme, _status: button::Status| button::Style {
+            background: Some(iced::Background::Color(Color::WHITE)),
+            text_color: Color::BLACK,
+            border: iced::Border::default().rounded(4.0),
+            ..Default::default()
+        };
+
+        let small_button_style = |_theme: &Theme, _status: button::Status| button::Style {
+            background: Some(iced::Background::Color(Color::from_rgb8(0x33, 0x33, 0x33))),
+            text_color: Color::WHITE,
+            border: iced::Border::default().rounded(4.0),
+            ..Default::default()
+        };
+
+        // Custom Text Input Style using `move` to capture `highlight_green` & `border_gray` by value
+        let custom_input_style = move |_theme: &Theme, status: text_input::Status| match status {
+            text_input::Status::Focused { .. } => text_input::Style {
+                background: iced::Background::Color(Color::from_rgb8(0x18, 0x18, 0x18)),
+                border: iced::Border::default()
+                    .rounded(4.0)
+                    .width(1.5)
+                    .color(highlight_green),
+                icon: Color::from_rgb8(0x88, 0x88, 0x88),
+                placeholder: Color::from_rgb8(0x66, 0x66, 0x66),
+                value: Color::WHITE,
+                selection: Color::from_rgb8(0x00, 0x55, 0x3A),
+            },
+            text_input::Status::Hovered => text_input::Style {
+                background: iced::Background::Color(Color::from_rgb8(0x1E, 0x1E, 0x1E)),
+                border: iced::Border::default()
+                    .rounded(4.0)
+                    .width(1.0)
+                    .color(Color::from_rgb8(0x55, 0x55, 0x55)),
+                icon: Color::from_rgb8(0x88, 0x88, 0x88),
+                placeholder: Color::from_rgb8(0x66, 0x66, 0x66),
+                value: Color::WHITE,
+                selection: Color::from_rgb8(0x00, 0x55, 0x3A),
+            },
+            _ => text_input::Style {
+                background: iced::Background::Color(Color::from_rgb8(0x18, 0x18, 0x18)),
+                border: iced::Border::default()
+                    .rounded(4.0)
+                    .width(1.0)
+                    .color(border_gray),
+                icon: Color::from_rgb8(0x88, 0x88, 0x88),
+                placeholder: Color::from_rgb8(0x66, 0x66, 0x66),
+                value: Color::WHITE,
+                selection: Color::from_rgb8(0x00, 0x55, 0x3A),
+            },
+        };
+
         // --- COLUMN 1: File Explorer Panel ---
+        let open_folder_btn = button(
+            container(
+                text("Open Folder")
+                    .font(LEXEND_BOLD)
+                    .color(Color::BLACK)
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(Message::SelectFolder)
+        .width(Length::Fill)
+        .padding(10)
+        .style(white_button_style);
+
+        let select_all_btn = button(text("Select All").size(11).font(LEXEND_REGULAR))
+            .on_press(Message::SelectAllFiles)
+            .style(small_button_style)
+            .padding(4);
+
+        let deselect_all_btn = button(text("Clear").size(11).font(LEXEND_REGULAR))
+            .on_press(Message::DeselectAllFiles)
+            .style(small_button_style)
+            .padding(4);
+
         let mut file_column = column![
-            button("Open Archive Directory").on_press(Message::SelectFolder),
-            Space::new().height(10),
-            text(format!("Files found: {}", self.file_list.len())).size(12),
+            open_folder_btn,
+            txt(self.status.clone()).size(12),
+            Space::new().height(5),
+            row![
+                txt(format!(
+                    "Selected: {}/{}",
+                    self.selected_files.len(),
+                    self.file_list.len()
+                ))
+                .size(12),
+                Space::new().width(Length::Fill),
+                select_all_btn,
+                deselect_all_btn,
+            ]
+            .align_y(iced::Alignment::Center)
+            .spacing(5),
             Space::new().height(10),
         ]
         .spacing(5);
@@ -259,105 +630,105 @@ impl ExifApp {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            let is_selected = self.selected_file.as_ref() == Some(file);
-            let label = if is_selected {
-                format!("▶ {}", file_name)
-            } else {
-                format!("  {}", file_name)
-            };
+            let is_selected = self.selected_files.contains(file);
+            let target_path = file.clone();
 
-            file_column = file_column.push(
-                button(text(label).size(13))
-                    .on_press(Message::SelectFile(file.clone()))
-                    .width(Length::Fill),
-            );
+            let item_button = button(
+                container(
+                    text(file_name)
+                        .font(LEXEND_REGULAR)
+                        .size(14)
+                        .color(if is_selected { Color::BLACK } else { Color::WHITE })
+                )
+                .width(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Left)
+                .align_y(iced::alignment::Vertical::Center),
+            )
+            .on_press(Message::ToggleFileSelection(target_path))
+            .width(Length::Fill)
+            .padding(8)
+            .style(move |_theme, _status| {
+                if is_selected {
+                    button::Style {
+                        background: Some(iced::Background::Color(highlight_green)),
+                        border: iced::Border::default().rounded(4.0),
+                        ..Default::default()
+                    }
+                } else {
+                    button::Style {
+                        background: None,
+                        border: iced::Border::default().rounded(4.0).width(1.0).color(border_gray),
+                        ..Default::default()
+                    }
+                }
+            });
+
+            file_column = file_column.push(item_button);
         }
 
         let explorer_panel = container(scrollable(file_column))
-            .width(220)
+            .width(240)
             .height(Length::Fill)
             .padding(10);
 
-        // --- COLUMN 2: Full Genealogy EXIF & Metadata Form ---
+        // --- COLUMN 2: Full EXIF & Metadata Form ---
+        let apply_btn_label = if self.selected_files.len() > 1 {
+            "Batch Apply Attributes"
+        } else {
+            "Apply Attributes"
+        };
+
+        let apply_batch_btn = button(
+            container(
+                text(apply_btn_label)
+                    .font(LEXEND_BOLD)
+                    .color(Color::BLACK)
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(Message::ApplyChanges)
+        .width(Length::Fill)
+        .padding(10)
+        .style(white_button_style);
+
+        let make_input_row = |label: &'static str, placeholder: &'static str, val: &str, on_change: fn(String) -> Message| {
+            row![
+                txt_str(label).width(120),
+                text_input(placeholder, val)
+                    .font(LEXEND_REGULAR)
+                    .on_input(on_change)
+                    .style(custom_input_style)
+            ]
+            .align_y(iced::Alignment::Center)
+        };
+
         let editor_column = column![
-            text("Genealogy Metadata").size(18),
-            Space::new().height(5),
-            // Temporal Fields
-            text("Dates & Timestamps").size(14),
-            row![
-                text("Original Date:").width(110),
-                text_input("YYYY:MM:DD", &self.date_str).on_input(Message::DateChanged)
-            ],
-            row![
-                text("Original Time:").width(110),
-                text_input("HH:MM:SS", &self.time_str).on_input(Message::TimeChanged)
-            ],
-            row![
-                text("Digitized Date:").width(110),
-                text_input("YYYY:MM:DD", &self.digitized_date_str)
-                    .on_input(Message::DigitizedDateChanged)
-            ],
-            row![
-                text("UTC Offset:").width(110),
-                text_input("-05:00", &self.offset_time_str).on_input(Message::OffsetTimeChanged)
-            ],
+            bold_title("Dates & Timestamps"),
+            make_input_row("Original Date:", "YYYY:MM:DD", &self.fields.date_str, Message::DateChanged),
+            make_input_row("Original Time:", "HH:MM:SS", &self.fields.time_str, Message::TimeChanged),
+            make_input_row("Digitized Date:", "YYYY:MM:DD", &self.fields.digitized_date_str, Message::DigitizedDateChanged),
+            make_input_row("UTC Offset:", "-05:00", &self.fields.offset_time_str, Message::OffsetTimeChanged),
             Space::new().height(10),
-            // Location GPS Fields
-            text("GPS Coordinates").size(14),
-            row![
-                text("Latitude:").width(110),
-                text_input("Decimal Lat", &self.latitude_str).on_input(Message::LatitudeChanged)
-            ],
-            row![
-                text("Longitude:").width(110),
-                text_input("Decimal Lon", &self.longitude_str).on_input(Message::LongitudeChanged)
-            ],
-            row![
-                text("Altitude (m):").width(110),
-                text_input("Meters", &self.altitude_str).on_input(Message::AltitudeChanged)
-            ],
+            bold_title("GPS Coordinates"),
+            make_input_row("Latitude:", "Decimal Lat", &self.fields.latitude_str, Message::LatitudeChanged),
+            make_input_row("Longitude:", "Decimal Lon", &self.fields.longitude_str, Message::LongitudeChanged),
+            make_input_row("Altitude (m):", "Meters", &self.fields.altitude_str, Message::AltitudeChanged),
             Space::new().height(10),
-            // Location Descriptive Fields
-            text("Location Details").size(14),
-            row![
-                text("City:").width(110),
-                text_input("City Name", &self.city_str).on_input(Message::CityChanged)
-            ],
-            row![
-                text("State/Province:").width(110),
-                text_input("State / Prov", &self.state_str).on_input(Message::StateChanged)
-            ],
-            row![
-                text("Country:").width(110),
-                text_input("Country", &self.country_str).on_input(Message::CountryChanged)
-            ],
-            row![
-                text("Sub-Location:").width(110),
-                text_input("Address / Landmark", &self.sublocation_str)
-                    .on_input(Message::SublocationChanged)
-            ],
+            bold_title("Location Details"),
+            make_input_row("City:", "City", &self.fields.city_str, Message::CityChanged),
+            make_input_row("State:", "State", &self.fields.state_str, Message::StateChanged),
+            make_input_row("Country:", "Country", &self.fields.country_str, Message::CountryChanged),
+            make_input_row("Sub-Location:", "Address / Landmark", &self.fields.sublocation_str, Message::SublocationChanged),
             Space::new().height(10),
-            // Biographical & Archival Fields
-            text("People & Context").size(14),
-            row![
-                text("Caption / Notes:").width(110),
-                text_input("Photo Description", &self.caption_str)
-                    .on_input(Message::CaptionChanged)
-            ],
-            row![
-                text("People in Image:").width(110),
-                text_input("Names", &self.people_str).on_input(Message::PeopleChanged)
-            ],
-            row![
-                text("Credit / Source:").width(110),
-                text_input("Archive Owner", &self.credit_str).on_input(Message::CreditChanged)
-            ],
+            bold_title("People & Context"),
+            make_input_row("Description:", "Description", &self.fields.caption_str, Message::CaptionChanged),
+            make_input_row("People:", "Names", &self.fields.people_str, Message::PeopleChanged),
+            make_input_row("Photographer:", "Photographer", &self.fields.credit_str, Message::CreditChanged),
             Space::new().height(15),
-            button("Batch Apply All Attributes")
-                .on_press(Message::ApplyChanges)
-                .padding(10),
-            Space::new().height(10),
-            text(&self.status).size(12),
+            apply_batch_btn,
         ]
         .spacing(8);
 
@@ -367,10 +738,12 @@ impl ExifApp {
             .padding(10);
 
         // --- COLUMN 3: Image Preview Panel ---
-        let preview_content: Element<Message> = match &self.selected_file {
+        let primary_selected = self.file_list.iter().find(|p| self.selected_files.contains(*p));
+
+        let preview_content: Element<Message> = match primary_selected {
             Some(path) => container(
                 column![
-                    text(format!(
+                    txt(format!(
                         "Preview: {}",
                         path.file_name().unwrap().to_string_lossy()
                     ))
@@ -380,21 +753,21 @@ impl ExifApp {
                         .width(Length::Fill)
                         .height(Length::Fill),
                 ]
-                .align_x(Alignment::Center),
+                .align_x(iced::Alignment::Center),
             )
             .width(Length::Fill)
             .height(Length::Fill)
             .into(),
-            None => container(text("Select a photo from the left menu to preview").size(14))
+            None => container(txt_str("Select a photo from the left menu to preview").size(14))
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center)
                 .into(),
         };
 
         // Root 3-Column Layout
-        row![
+        let content = row![
             explorer_panel,
             container(Space::new().width(1)).height(Length::Fill),
             editor_panel,
@@ -404,8 +777,16 @@ impl ExifApp {
         .spacing(10)
         .padding(10)
         .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+        .height(Length::Fill);
+
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(iced::Background::Color(Color::BLACK)),
+                ..Default::default()
+            })
+            .into()
     }
 }
 
