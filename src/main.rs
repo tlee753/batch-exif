@@ -539,7 +539,6 @@ impl ExifApp {
             ..Default::default()
         };
 
-        // Custom Text Input Style using `move` to capture `highlight_green` & `border_gray` by value
         let custom_input_style = move |_theme: &Theme, status: text_input::Status| match status {
             text_input::Status::Focused { .. } => text_input::Style {
                 background: iced::Background::Color(Color::from_rgb8(0x18, 0x18, 0x18)),
@@ -605,6 +604,7 @@ impl ExifApp {
 
         let mut file_column = column![
             open_folder_btn,
+            Space::new().height(10),
             txt(self.status.clone()).size(12),
             Space::new().height(5),
             row![
@@ -715,7 +715,7 @@ impl ExifApp {
             bold_title("GPS Coordinates"),
             make_input_row("Latitude:", "Decimal Lat", &self.fields.latitude_str, Message::LatitudeChanged),
             make_input_row("Longitude:", "Decimal Lon", &self.fields.longitude_str, Message::LongitudeChanged),
-            make_input_row("Altitude (m):", "Meters", &self.fields.altitude_str, Message::AltitudeChanged),
+            make_input_row("Altitude:", "Meters", &self.fields.altitude_str, Message::AltitudeChanged),
             Space::new().height(10),
             bold_title("Location Details"),
             make_input_row("City:", "City", &self.fields.city_str, Message::CityChanged),
@@ -726,7 +726,7 @@ impl ExifApp {
             bold_title("People & Context"),
             make_input_row("Description:", "Description", &self.fields.caption_str, Message::CaptionChanged),
             make_input_row("People:", "Names", &self.fields.people_str, Message::PeopleChanged),
-            make_input_row("Photographer:", "Photographer", &self.fields.credit_str, Message::CreditChanged),
+            make_input_row("Credit:", "Photographer", &self.fields.credit_str, Message::CreditChanged),
             Space::new().height(15),
             apply_batch_btn,
         ]
