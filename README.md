@@ -22,6 +22,10 @@ Batch Exif Offline Editor in Rust/Iced
 | **IPTC:PersonInImage** | List of individual names corresponding to the people appearing in the photo. |
 | **IPTC:Credit / IPTC:Byline** | The photographer, original collector, or contributor who provided the photograph. |
 
+### Demo Images
+![Empty](v2.1-empty.png)
+![Selected](v2.1-selected.png)
+
 ### Arch Windows Cross Compilation
 ```bash
 sudo pacman -S mingw-w64-gcc
