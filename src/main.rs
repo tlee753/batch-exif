@@ -10,20 +10,16 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-// Include both static TTF files using your exact lowercase filenames
+// Lexend Font
 const LEXEND_REGULAR_BYTES: &[u8] = include_bytes!("lexend-regular.ttf");
 const LEXEND_BOLD_BYTES: &[u8] = include_bytes!("lexend-bold.ttf");
-
 const LEXEND_FONT_NAME: &str = "Lexend";
-
-// Font configurations targeting the same registered family name
 const LEXEND_REGULAR: Font = Font {
     family: font::Family::Name(LEXEND_FONT_NAME),
     weight: font::Weight::Normal,
     stretch: font::Stretch::Normal,
     style: font::Style::Normal,
 };
-
 const LEXEND_BOLD: Font = Font {
     family: font::Family::Name(LEXEND_FONT_NAME),
     weight: font::Weight::Bold,
