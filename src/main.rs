@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 use iced::font::{self, Font};
 use iced::widget::{Space, button, column, container, image, row, scrollable, text, text_input};
 use iced::{Color, Element, Length, Task, Theme};
