@@ -1,11 +1,13 @@
 #![windows_subsystem = "windows"]
 
 use bytes::Bytes;
+use iced::event::{self, Event};
 use iced::font::{self, Font};
+use iced::keyboard::{self, key::Key};
 use iced::widget::{
     button, column, container, image, row, scrollable, space::Space, text, text_input,
 };
-use iced::{Color, Element, Length, Task, Theme};
+use iced::{Color, Element, Length, Subscription, Task, Theme};
 use img_parts::jpeg::{Jpeg, JpegSegment};
 use img_parts::png::{Png, PngChunk};
 use little_exif::exif_tag::ExifTag;
@@ -36,7 +38,8 @@ const PNG_XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
 
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("EXIF + XMP Batch Editor (JPEG & PNG) v3.4")
+        .title("EXIF + XMP Batch Editor (JPEG & PNG) v3.5")
+        .subscription(ExifApp::subscription)
         .theme(|_: &ExifApp| Theme::Dark)
         .font(LEXEND_REGULAR_BYTES)
         .font(LEXEND_BOLD_BYTES)
@@ -102,6 +105,7 @@ enum Message {
     CreditChanged(String),
 
     ApplyChanges,
+    EventOccurred(Event),
 }
 
 impl Default for ExifApp {
@@ -117,6 +121,10 @@ impl Default for ExifApp {
 }
 
 impl ExifApp {
+    fn subscription(&self) -> Subscription<Message> {
+        event::listen().map(Message::EventOccurred)
+    }
+
     fn extract_fields_from_path(path: &PathBuf) -> ExifFields {
         let mut fields = ExifFields::default();
 
@@ -214,7 +222,7 @@ impl ExifApp {
             }
         }
 
-        // 2. Read Extended Fields from XMP via img-parts (Format-aware)
+        // 2. Read Extended Fields from XMP via img-parts
         if let Ok(file_bytes) = fs::read(path) {
             let ext = path
                 .extension()
@@ -341,6 +349,24 @@ impl ExifApp {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::EventOccurred(Event::Keyboard(keyboard::Event::KeyPressed {
+                key, ..
+            })) => {
+                match key.as_ref() {
+                    Key::Character("a") | Key::Character("A") => {
+                        return self.update(Message::SelectAllFiles);
+                    }
+                    Key::Character("n") | Key::Character("N") | Key::Character("d") | Key::Character("D") => {
+                        return self.update(Message::DeselectAllFiles);
+                    }
+                    Key::Character("o") | Key::Character("O") => {
+                        return self.update(Message::SelectFolder);
+                    }
+                    _ => Task::none(),
+                }
+            }
+            Message::EventOccurred(_) => Task::none(),
+
             Message::SelectFolder => Task::future(async {
                 let handle = rfd::AsyncFileDialog::new().pick_folder().await;
                 Message::FolderSelected(handle.map(|h| h.path().to_path_buf()))
@@ -462,10 +488,8 @@ impl ExifApp {
                 let mut error_count = 0;
 
                 for path in &self.selected_files {
-                    // Extract existing metadata for this specific file first so we can fall back on untouched fields
                     let existing = Self::extract_fields_from_path(path);
 
-                    // Determine final values: use UI input if non-empty, otherwise preserve file's original value
                     let final_city = if !self.fields.city_str.trim().is_empty() {
                         self.fields.city_str.trim()
                     } else {
@@ -585,28 +609,27 @@ impl ExifApp {
                             .map(|p| format!("<rdf:li>{}</rdf:li>", p))
                             .collect::<String>();
 
-                        // Construct merged XMP block retaining per-file unedited values
                         let xmp_xml = format!(
                             r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
-            <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c140">
-             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-              <rdf:Description rdf:about=""
-                xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
-                xmlns:iptcCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
-                xmlns:dc="http://purl.org/dc/elements/1.1/">
-               <photoshop:City>{}</photoshop:City>
-               <photoshop:State>{}</photoshop:State>
-               <photoshop:Country>{}</photoshop:Country>
-               <iptcCore:Location>{}</iptcCore:Location>
-               <dc:subject>
-                <rdf:Bag>
-                 {}
-                </rdf:Bag>
-               </dc:subject>
-              </rdf:Description>
-             </rdf:RDF>
-            </x:xmpmeta>
-            <?xpacket end="w"?>"#,
+<x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c140">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+    xmlns:iptcCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+    xmlns:dc="http://purl.org/dc/elements/1.1/">
+   <photoshop:City>{}</photoshop:City>
+   <photoshop:State>{}</photoshop:State>
+   <photoshop:Country>{}</photoshop:Country>
+   <iptcCore:Location>{}</iptcCore:Location>
+   <dc:subject>
+    <rdf:Bag>
+     {}
+    </rdf:Bag>
+   </dc:subject>
+  </rdf:Description>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"#,
                             final_city, final_state, final_country, final_sublocation, people_rdf
                         );
 
@@ -814,12 +837,12 @@ impl ExifApp {
         .padding(0)
         .style(white_button_style);
 
-        let select_all_btn = button(text("Select All").size(11).font(LEXEND_REGULAR))
+        let select_all_btn = button(text("All").size(12).font(LEXEND_REGULAR))
             .on_press(Message::SelectAllFiles)
             .style(small_button_style)
             .padding(4);
 
-        let deselect_all_btn = button(text("Clear").size(11).font(LEXEND_REGULAR))
+        let deselect_all_btn = button(text("None").size(12).font(LEXEND_REGULAR))
             .on_press(Message::DeselectAllFiles)
             .style(small_button_style)
             .padding(4);
@@ -1002,7 +1025,7 @@ impl ExifApp {
             ),
             make_input_row(
                 "Credit:",
-                "Photographer / Artist",
+                "Photographer",
                 &self.fields.credit_str,
                 Message::CreditChanged
             ),
