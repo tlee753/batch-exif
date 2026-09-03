@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bytes = "1.12"
 iced = { version = "0.14", features = ["image"] }
-rfd = "0.17"
+imagesize = "0.15"
+img-parts = "0.4"
 little_exif = "0.6"
+rfd = "0.17"

@@ -1,8 +1,13 @@
 #![windows_subsystem = "windows"]
 
+use bytes::Bytes;
 use iced::font::{self, Font};
-use iced::widget::{Space, button, column, container, image, row, scrollable, text, text_input};
+use iced::widget::{
+    button, column, container, image, row, scrollable, space::Space, text, text_input,
+};
 use iced::{Color, Element, Length, Task, Theme};
+use img_parts::jpeg::{Jpeg, JpegSegment};
+use img_parts::png::{Png, PngChunk};
 use little_exif::exif_tag::ExifTag;
 use little_exif::metadata::Metadata;
 use little_exif::rational::uR64;
@@ -10,7 +15,6 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-// Lexend Font
 const LEXEND_REGULAR_BYTES: &[u8] = include_bytes!("lexend-regular.ttf");
 const LEXEND_BOLD_BYTES: &[u8] = include_bytes!("lexend-bold.ttf");
 const LEXEND_FONT_NAME: &str = "Lexend";
@@ -27,12 +31,15 @@ const LEXEND_BOLD: Font = Font {
     style: font::Style::Normal,
 };
 
+const XMP_HEADER: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
+const PNG_XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
+
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("EXIF Batch Tool v2.1")
+        .title("EXIF + XMP Batch Editor (JPEG & PNG) v3.4")
         .theme(|_: &ExifApp| Theme::Dark)
-        .font(LEXEND_REGULAR_BYTES) // Register Regular variant into font database
-        .font(LEXEND_BOLD_BYTES) // Register Bold variant into font database
+        .font(LEXEND_REGULAR_BYTES)
+        .font(LEXEND_BOLD_BYTES)
         .default_font(LEXEND_REGULAR)
         .window(iced::window::Settings {
             size: iced::Size::new(1600.0, 900.0),
@@ -44,23 +51,23 @@ pub fn main() -> iced::Result {
 
 #[derive(Default, Clone, PartialEq, Eq)]
 struct ExifFields {
+    // Standard EXIF
     date_str: String,
     time_str: String,
     digitized_date_str: String,
     offset_time_str: String,
-
     latitude_str: String,
     longitude_str: String,
     altitude_str: String,
+    caption_str: String,
+    credit_str: String,
 
+    // Extended XMP Fields
     city_str: String,
     state_str: String,
     country_str: String,
     sublocation_str: String,
-
-    caption_str: String,
     people_str: String,
-    credit_str: String,
 }
 
 struct ExifApp {
@@ -79,7 +86,6 @@ enum Message {
     SelectAllFiles,
     DeselectAllFiles,
 
-    // Form Input Messages
     DateChanged(String),
     TimeChanged(String),
     DigitizedDateChanged(String),
@@ -105,7 +111,7 @@ impl Default for ExifApp {
             file_list: Vec::new(),
             selected_files: HashSet::new(),
             fields: ExifFields::default(),
-            status: "Select a folder to load archive photos.".to_string(),
+            status: "Select a folder to manage image metadata.".to_string(),
         }
     }
 }
@@ -114,8 +120,8 @@ impl ExifApp {
     fn extract_fields_from_path(path: &PathBuf) -> ExifFields {
         let mut fields = ExifFields::default();
 
+        // 1. Read EXIF via little_exif
         if let Ok(metadata) = Metadata::new_from_path(path) {
-            // Original Date & Time
             if let Some(ExifTag::DateTimeOriginal(val)) = metadata
                 .get_tag(&ExifTag::DateTimeOriginal(String::new()))
                 .next()
@@ -129,14 +135,12 @@ impl ExifApp {
                 }
             }
 
-            // Digitized / Create Date
             if let Some(ExifTag::CreateDate(val)) =
                 metadata.get_tag(&ExifTag::CreateDate(String::new())).next()
             {
                 fields.digitized_date_str = val.clone();
             }
 
-            // Timezone Offset
             if let Some(ExifTag::OffsetTimeOriginal(val)) = metadata
                 .get_tag(&ExifTag::OffsetTimeOriginal(String::new()))
                 .next()
@@ -144,7 +148,6 @@ impl ExifApp {
                 fields.offset_time_str = val.clone();
             }
 
-            // Latitude
             if let Some(ExifTag::GPSLatitude(rats)) =
                 metadata.get_tag(&ExifTag::GPSLatitude(Vec::new())).next()
             {
@@ -166,7 +169,6 @@ impl ExifApp {
                 }
             }
 
-            // Longitude
             if let Some(ExifTag::GPSLongitude(rats)) =
                 metadata.get_tag(&ExifTag::GPSLongitude(Vec::new())).next()
             {
@@ -188,7 +190,6 @@ impl ExifApp {
                 }
             }
 
-            // Altitude
             if let Some(ExifTag::GPSAltitude(rats)) =
                 metadata.get_tag(&ExifTag::GPSAltitude(Vec::new())).next()
             {
@@ -199,7 +200,6 @@ impl ExifApp {
                 }
             }
 
-            // Description / Caption
             if let Some(ExifTag::ImageDescription(val)) = metadata
                 .get_tag(&ExifTag::ImageDescription(String::new()))
                 .next()
@@ -207,32 +207,71 @@ impl ExifApp {
                 fields.caption_str = val.clone();
             }
 
-            // Photographer / Credit
             if let Some(ExifTag::Artist(val)) =
                 metadata.get_tag(&ExifTag::Artist(String::new())).next()
             {
                 fields.credit_str = val.clone();
             }
+        }
 
-            // Location Metadata
-            if let Some(ExifTag::Software(val)) =
-                metadata.get_tag(&ExifTag::Software(String::new())).next()
-            {
-                let parts: Vec<&str> = val.split('|').collect();
-                if parts.len() == 4 {
-                    fields.city_str = parts[0].to_string();
-                    fields.state_str = parts[1].to_string();
-                    fields.country_str = parts[2].to_string();
-                    fields.sublocation_str = parts[3].to_string();
-                }
-            }
+        // 2. Read Extended Fields from XMP via img-parts (Format-aware)
+        if let Ok(file_bytes) = fs::read(path) {
+            let ext = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
 
-            if let Some(ExifTag::UserComment(val)) =
-                metadata.get_tag(&ExifTag::UserComment(Vec::new())).next()
-            {
-                if let Ok(s) = String::from_utf8(val.clone()) {
-                    fields.people_str = s.trim_start_matches("ASCII\0\0\0").to_string();
+            let xmp_string: Option<String> = if ext == "png" {
+                if let Ok(png) = Png::from_bytes(Bytes::from(file_bytes)) {
+                    png.chunks().iter().find_map(|chunk| {
+                        if chunk.kind() == *b"iTXt" {
+                            let raw = chunk.contents();
+                            if let Some(pos) = raw
+                                .windows(11)
+                                .position(|w| w == b"<x:xmpmeta " || w == b"<rdf:RDF ")
+                            {
+                                std::str::from_utf8(&raw[pos..]).ok().map(|s| s.to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
                 }
+            } else {
+                if let Ok(jpeg) = Jpeg::from_bytes(Bytes::from(file_bytes)) {
+                    jpeg.segments().iter().find_map(|segment| {
+                        let contents = segment.contents();
+                        if contents.starts_with(XMP_HEADER) {
+                            std::str::from_utf8(&contents[XMP_HEADER.len()..])
+                                .ok()
+                                .map(|s| s.to_string())
+                        } else if let Some(pos) = contents
+                            .windows(11)
+                            .position(|w| w == b"<x:xmpmeta " || w == b"<rdf:RDF ")
+                        {
+                            std::str::from_utf8(&contents[pos..])
+                                .ok()
+                                .map(|s| s.to_string())
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                }
+            };
+
+            if let Some(xmp_str) = xmp_string {
+                fields.city_str = parse_xmp_tag(&xmp_str, "photoshop:City");
+                fields.state_str = parse_xmp_tag(&xmp_str, "photoshop:State");
+                fields.country_str = parse_xmp_tag(&xmp_str, "photoshop:Country");
+                fields.sublocation_str = parse_xmp_tag(&xmp_str, "iptcCore:Location");
+                fields.people_str = parse_xmp_bag(&xmp_str, "dc:subject");
             }
         }
 
@@ -264,7 +303,6 @@ impl ExifApp {
                 if common.offset_time_str != current.offset_time_str {
                     common.offset_time_str.clear();
                 }
-
                 if common.latitude_str != current.latitude_str {
                     common.latitude_str.clear();
                 }
@@ -274,7 +312,12 @@ impl ExifApp {
                 if common.altitude_str != current.altitude_str {
                     common.altitude_str.clear();
                 }
-
+                if common.caption_str != current.caption_str {
+                    common.caption_str.clear();
+                }
+                if common.credit_str != current.credit_str {
+                    common.credit_str.clear();
+                }
                 if common.city_str != current.city_str {
                     common.city_str.clear();
                 }
@@ -287,15 +330,8 @@ impl ExifApp {
                 if common.sublocation_str != current.sublocation_str {
                     common.sublocation_str.clear();
                 }
-
-                if common.caption_str != current.caption_str {
-                    common.caption_str.clear();
-                }
                 if common.people_str != current.people_str {
                     common.people_str.clear();
-                }
-                if common.credit_str != current.credit_str {
-                    common.credit_str.clear();
                 }
             }
 
@@ -341,7 +377,6 @@ impl ExifApp {
                 } else {
                     self.selected_files.insert(file_path);
                 }
-
                 self.update_fields_from_selection();
                 Task::none()
             }
@@ -414,13 +449,8 @@ impl ExifApp {
             }
 
             Message::ApplyChanges => {
-                if self.folder_path.is_none() {
-                    self.status = "Error: No folder selected!".to_string();
-                    return Task::none();
-                }
-
-                if self.selected_files.is_empty() {
-                    self.status = "Error: No target files selected to apply changes!".to_string();
+                if self.folder_path.is_none() || self.selected_files.is_empty() {
+                    self.status = "Error: No files selected!".to_string();
                     return Task::none();
                 }
 
@@ -432,40 +462,57 @@ impl ExifApp {
                 let mut error_count = 0;
 
                 for path in &self.selected_files {
+                    // Extract existing metadata for this specific file first so we can fall back on untouched fields
+                    let existing = Self::extract_fields_from_path(path);
+
+                    // Determine final values: use UI input if non-empty, otherwise preserve file's original value
+                    let final_city = if !self.fields.city_str.trim().is_empty() {
+                        self.fields.city_str.trim()
+                    } else {
+                        &existing.city_str
+                    };
+
+                    let final_state = if !self.fields.state_str.trim().is_empty() {
+                        self.fields.state_str.trim()
+                    } else {
+                        &existing.state_str
+                    };
+
+                    let final_country = if !self.fields.country_str.trim().is_empty() {
+                        self.fields.country_str.trim()
+                    } else {
+                        &existing.country_str
+                    };
+
+                    let final_sublocation = if !self.fields.sublocation_str.trim().is_empty() {
+                        self.fields.sublocation_str.trim()
+                    } else {
+                        &existing.sublocation_str
+                    };
+
+                    let final_people_raw = if !self.fields.people_str.trim().is_empty() {
+                        self.fields.people_str.trim()
+                    } else {
+                        &existing.people_str
+                    };
+
+                    // --- STEP 1: Write EXIF via little_exif ---
                     let mut metadata =
                         Metadata::new_from_path(path).unwrap_or_else(|_| Metadata::new());
 
-                    // --- Dates & Times ---
                     if !self.fields.date_str.trim().is_empty()
                         || !self.fields.time_str.trim().is_empty()
                     {
-                        let mut curr_date = String::new();
-                        let mut curr_time = String::new();
-                        if let Some(ExifTag::DateTimeOriginal(val)) = metadata
-                            .get_tag(&ExifTag::DateTimeOriginal(String::new()))
-                            .next()
-                        {
-                            let parts: Vec<&str> = val.split_whitespace().collect();
-                            if parts.len() >= 2 {
-                                curr_date = parts[0].to_string();
-                                curr_time = parts[1].to_string();
-                            } else {
-                                curr_date = val.clone();
-                            }
-                        }
-
                         let new_date = if !self.fields.date_str.trim().is_empty() {
                             self.fields.date_str.trim()
                         } else {
-                            &curr_date
+                            &existing.date_str
                         };
-
                         let new_time = if !self.fields.time_str.trim().is_empty() {
                             self.fields.time_str.trim()
                         } else {
-                            &curr_time
+                            &existing.time_str
                         };
-
                         metadata.set_tag(ExifTag::DateTimeOriginal(format!(
                             "{} {}",
                             new_date, new_time
@@ -484,7 +531,6 @@ impl ExifApp {
                         ));
                     }
 
-                    // --- GPS Coordinates ---
                     if let Some(lat) = lat_opt {
                         let lat_ref = if lat >= 0.0 { "N" } else { "S" };
                         metadata.set_tag(ExifTag::GPSLatitude(decimal_to_dms_rationals(lat.abs())));
@@ -507,7 +553,6 @@ impl ExifApp {
                         metadata.set_tag(ExifTag::GPSAltitudeRef(vec![0]));
                     }
 
-                    // --- Description & Photographer ---
                     if !self.fields.caption_str.trim().is_empty() {
                         metadata.set_tag(ExifTag::ImageDescription(
                             self.fields.caption_str.trim().to_string(),
@@ -519,85 +564,134 @@ impl ExifApp {
                             .set_tag(ExifTag::Artist(self.fields.credit_str.trim().to_string()));
                     }
 
-                    // --- Selective Location Update ---
-                    let has_city = !self.fields.city_str.trim().is_empty();
-                    let has_state = !self.fields.state_str.trim().is_empty();
-                    let has_country = !self.fields.country_str.trim().is_empty();
-                    let has_sublocation = !self.fields.sublocation_str.trim().is_empty();
+                    let _ = metadata.write_to_file(path);
 
-                    if has_city || has_state || has_country || has_sublocation {
-                        let mut curr_city = String::new();
-                        let mut curr_state = String::new();
-                        let mut curr_country = String::new();
-                        let mut curr_sublocation = String::new();
+                    // --- STEP 2: Write Extended XMP via img-parts ---
+                    if let Ok(raw_bytes) = fs::read(path) {
+                        let ext = path
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("")
+                            .to_lowercase();
 
-                        if let Some(ExifTag::Software(val)) =
-                            metadata.get_tag(&ExifTag::Software(String::new())).next()
-                        {
-                            let parts: Vec<&str> = val.split('|').collect();
-                            if parts.len() == 4 {
-                                curr_city = parts[0].to_string();
-                                curr_state = parts[1].to_string();
-                                curr_country = parts[2].to_string();
-                                curr_sublocation = parts[3].to_string();
-                            }
-                        }
+                        let people_list: Vec<&str> = final_people_raw
+                            .split(',')
+                            .map(|s| s.trim())
+                            .filter(|s| !s.is_empty())
+                            .collect();
 
-                        let final_city = if has_city {
-                            self.fields.city_str.trim()
-                        } else {
-                            &curr_city
-                        };
-                        let final_state = if has_state {
-                            self.fields.state_str.trim()
-                        } else {
-                            &curr_state
-                        };
-                        let final_country = if has_country {
-                            self.fields.country_str.trim()
-                        } else {
-                            &curr_country
-                        };
-                        let final_sublocation = if has_sublocation {
-                            self.fields.sublocation_str.trim()
-                        } else {
-                            &curr_sublocation
-                        };
+                        let people_rdf = people_list
+                            .iter()
+                            .map(|p| format!("<rdf:li>{}</rdf:li>", p))
+                            .collect::<String>();
 
-                        let loc_payload = format!(
-                            "{}|{}|{}|{}",
-                            final_city, final_state, final_country, final_sublocation
+                        // Construct merged XMP block retaining per-file unedited values
+                        let xmp_xml = format!(
+                            r#"<?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+            <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 5.6-c140">
+             <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+              <rdf:Description rdf:about=""
+                xmlns:photoshop="http://ns.adobe.com/photoshop/1.0/"
+                xmlns:iptcCore="http://iptc.org/std/Iptc4xmpCore/1.0/xmlns/"
+                xmlns:dc="http://purl.org/dc/elements/1.1/">
+               <photoshop:City>{}</photoshop:City>
+               <photoshop:State>{}</photoshop:State>
+               <photoshop:Country>{}</photoshop:Country>
+               <iptcCore:Location>{}</iptcCore:Location>
+               <dc:subject>
+                <rdf:Bag>
+                 {}
+                </rdf:Bag>
+               </dc:subject>
+              </rdf:Description>
+             </rdf:RDF>
+            </x:xmpmeta>
+            <?xpacket end="w"?>"#,
+                            final_city, final_state, final_country, final_sublocation, people_rdf
                         );
-                        metadata.set_tag(ExifTag::Software(loc_payload));
-                    }
 
-                    // --- People Tag ---
-                    if !self.fields.people_str.trim().is_empty() {
-                        let mut comment_bytes =
-                            vec![0x41, 0x53, 0x43, 0x49, 0x49, 0x00, 0x00, 0x00];
-                        comment_bytes.extend(self.fields.people_str.trim().bytes());
-                        metadata.set_tag(ExifTag::UserComment(comment_bytes));
-                    }
+                        let write_res = if ext == "png" {
+                            if let Ok(mut png) = Png::from_bytes(Bytes::from(raw_bytes)) {
+                                let mut itxt_payload = Vec::new();
+                                itxt_payload.extend_from_slice(PNG_XMP_KEYWORD);
+                                itxt_payload.extend_from_slice(&[0, 0]);
+                                itxt_payload.extend_from_slice(b"\0");
+                                itxt_payload.extend_from_slice(b"\0");
+                                itxt_payload.extend_from_slice(xmp_xml.as_bytes());
 
-                    match metadata.write_to_file(path) {
-                        Ok(_) => success_count += 1,
-                        Err(e) => {
-                            eprintln!("Failed to write EXIF for {:?}: {:?}", path, e);
-                            error_count += 1;
+                                png.chunks_mut().retain(|chunk| {
+                                    if chunk.kind() == *b"iTXt" {
+                                        let contents = chunk.contents();
+                                        !contents.starts_with(PNG_XMP_KEYWORD)
+                                            && !contents
+                                                .windows(11)
+                                                .any(|w| w == b"<x:xmpmeta " || w == b"<rdf:RDF ")
+                                    } else {
+                                        true
+                                    }
+                                });
+
+                                let insert_pos = png
+                                    .chunks()
+                                    .iter()
+                                    .position(|c| c.kind() == *b"IDAT")
+                                    .unwrap_or(png.chunks().len());
+
+                                png.chunks_mut().insert(
+                                    insert_pos,
+                                    PngChunk::new(*b"iTXt", Bytes::from(itxt_payload)),
+                                );
+
+                                let mut output_buffer = Vec::new();
+                                if png.encoder().write_to(&mut output_buffer).is_ok() {
+                                    fs::write(path, output_buffer).is_ok()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            if let Ok(mut jpeg) = Jpeg::from_bytes(Bytes::from(raw_bytes)) {
+                                let mut payload = Vec::from(XMP_HEADER);
+                                payload.extend_from_slice(xmp_xml.as_bytes());
+
+                                jpeg.segments_mut().retain(|seg| {
+                                    let contents = seg.contents();
+                                    !contents.starts_with(XMP_HEADER)
+                                        && !contents
+                                            .windows(11)
+                                            .any(|w| w == b"<x:xmpmeta " || w == b"<rdf:RDF ")
+                                });
+
+                                let segment =
+                                    JpegSegment::new_with_contents(0xE1, Bytes::from(payload));
+                                let idx = if jpeg.segments().is_empty() { 0 } else { 1 };
+                                jpeg.segments_mut().insert(idx, segment);
+
+                                let mut output_buffer = Vec::new();
+                                if jpeg.encoder().write_to(&mut output_buffer).is_ok() {
+                                    fs::write(path, output_buffer).is_ok()
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        };
+
+                        if write_res {
+                            success_count += 1;
+                            continue;
                         }
                     }
+                    error_count += 1;
                 }
 
-                self.update_fields_from_selection();
-
-                if error_count > 0 {
-                    self.status = format!(
-                        "Updated {} file(s), failed on {} file(s).",
-                        success_count, error_count
-                    );
-                } else {
-                    self.status = format!("Successfully saved EXIF to {} file(s).", success_count);
-                }
+                self.status = format!(
+                    "Updated: {} succeeded, {} failed.",
+                    success_count, error_count
+                );
 
                 Task::none()
             }
@@ -708,7 +802,6 @@ impl ExifApp {
             }
         };
 
-        // --- COLUMN 1: File Explorer Panel ---
         let open_folder_btn = button(
             container(text("Open Folder").font(LEXEND_BOLD).color(Color::BLACK))
                 .width(Length::Fill)
@@ -770,7 +863,6 @@ impl ExifApp {
                         .font(LEXEND_REGULAR)
                         .size(14)
                         .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::Word)
                         .color(if is_selected {
                             Color::BLACK
                         } else {
@@ -789,8 +881,6 @@ impl ExifApp {
             )
             .on_press(Message::ToggleFileSelection(target_path))
             .width(Length::Fixed(220.0))
-            .clip(false)
-            .padding(0)
             .style(move |_theme, _status| {
                 if is_selected {
                     button::Style {
@@ -819,35 +909,10 @@ impl ExifApp {
             .width(Length::Fill)
             .height(Length::Fill);
 
-        let explorer_panel = container(column![explorer_header, scrollable_files,])
+        let explorer_panel = container(column![explorer_header, scrollable_files])
             .width(Length::Fixed(240.0))
             .height(Length::Fill)
-            .clip(false)
-            .padding(iced::Padding {
-                top: 10.0,
-                bottom: 10.0,
-                left: 10.0,
-                right: 10.0,
-            });
-
-        // --- COLUMN 2: Full EXIF & Metadata Form ---
-        let apply_btn_label = if self.selected_files.len() > 1 {
-            "Batch Apply Attributes"
-        } else {
-            "Apply Attributes"
-        };
-
-        let apply_batch_btn = button(
-            container(text(apply_btn_label).font(LEXEND_BOLD).color(Color::BLACK))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(iced::alignment::Horizontal::Center)
-                .align_y(iced::alignment::Vertical::Center),
-        )
-        .on_press(Message::ApplyChanges)
-        .width(Length::Fill)
-        .padding(10)
-        .style(white_button_style);
+            .padding(10);
 
         let make_input_row = |label: &'static str,
                               placeholder: &'static str,
@@ -863,8 +928,26 @@ impl ExifApp {
             .align_y(iced::Alignment::Center)
         };
 
+        let apply_btn_label = if self.selected_files.len() > 1 {
+            "Batch Apply EXIF + XMP"
+        } else {
+            "Apply EXIF + XMP"
+        };
+
+        let apply_batch_btn = button(
+            container(text(apply_btn_label).font(LEXEND_BOLD).color(Color::BLACK))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(iced::alignment::Horizontal::Center)
+                .align_y(iced::alignment::Vertical::Center),
+        )
+        .on_press(Message::ApplyChanges)
+        .width(Length::Fill)
+        .padding(10)
+        .style(white_button_style);
+
         let editor_column = column![
-            bold_title("Dates & Timestamps"),
+            bold_title("EXIF Dates & Timestamps"),
             make_input_row(
                 "Original Date:",
                 "YYYY:MM:DD",
@@ -890,7 +973,7 @@ impl ExifApp {
                 Message::OffsetTimeChanged
             ),
             Space::new().height(10),
-            bold_title("GPS Coordinates"),
+            bold_title("EXIF GPS Coordinates"),
             make_input_row(
                 "Latitude:",
                 "Decimal Lat",
@@ -910,7 +993,21 @@ impl ExifApp {
                 Message::AltitudeChanged
             ),
             Space::new().height(10),
-            bold_title("Location Details"),
+            bold_title("EXIF Context"),
+            make_input_row(
+                "Description:",
+                "Caption",
+                &self.fields.caption_str,
+                Message::CaptionChanged
+            ),
+            make_input_row(
+                "Credit:",
+                "Photographer / Artist",
+                &self.fields.credit_str,
+                Message::CreditChanged
+            ),
+            Space::new().height(10),
+            bold_title("XMP Extended Location"),
             make_input_row("City:", "City", &self.fields.city_str, Message::CityChanged),
             make_input_row(
                 "State:",
@@ -926,29 +1023,17 @@ impl ExifApp {
             ),
             make_input_row(
                 "Sub-Location:",
-                "Address / Landmark",
+                "Landmark / Venue",
                 &self.fields.sublocation_str,
                 Message::SublocationChanged
             ),
             Space::new().height(10),
-            bold_title("People & Context"),
-            make_input_row(
-                "Description:",
-                "Description",
-                &self.fields.caption_str,
-                Message::CaptionChanged
-            ),
+            bold_title("XMP Tagged People"),
             make_input_row(
                 "People:",
-                "Names",
+                "Comma separated names",
                 &self.fields.people_str,
                 Message::PeopleChanged
-            ),
-            make_input_row(
-                "Credit:",
-                "Photographer",
-                &self.fields.credit_str,
-                Message::CreditChanged
             ),
             Space::new().height(15),
             apply_batch_btn,
@@ -962,37 +1047,53 @@ impl ExifApp {
         )
         .width(Length::Fixed(360.0))
         .height(Length::Fill)
-        .padding(iced::Padding {
-            top: 10.0,
-            bottom: 10.0,
-            left: 10.0,
-            right: 10.0,
-        });
+        .padding(10);
 
-        // --- COLUMN 3: Image Preview Panel ---
         let primary_selected = self
             .file_list
             .iter()
             .rfind(|p| self.selected_files.contains(*p));
 
         let preview_content: Element<Message> = match primary_selected {
-            Some(path) => container(
-                column![
-                    txt(format!(
-                        "Preview: {}",
-                        path.file_name().unwrap().to_string_lossy()
-                    ))
-                    .size(14),
-                    Space::new().height(10),
-                    image(path.to_string_lossy().to_string())
-                        .width(Length::Fill)
-                        .height(Length::Fill),
-                ]
-                .align_x(iced::Alignment::Center),
-            )
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into(),
+            Some(path) => {
+                let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+                let file_size_str = if let Ok(meta) = fs::metadata(path) {
+                    let bytes = meta.len();
+                    if bytes >= 1_048_576 {
+                        format!("{:.2} MB", bytes as f64 / 1_048_576.0)
+                    } else {
+                        format!("{:.1} KB", bytes as f64 / 1_024.0)
+                    }
+                } else {
+                    "Unknown Size".to_string()
+                };
+
+                let dimensions_str = if let Ok(dim) = imagesize::size(path) {
+                    format!("{} × {} px", dim.width, dim.height)
+                } else {
+                    "Dimensions unknown".to_string()
+                };
+
+                container(
+                    column![
+                        txt(format!("File: {}", file_name)).size(14),
+                        txt(format!(
+                            "Size: {} | Dimensions: {}",
+                            file_size_str, dimensions_str
+                        ))
+                        .size(12)
+                        .color(Color::from_rgb8(0xAA, 0xAA, 0xAA)),
+                        Space::new().height(10),
+                        image(path.to_string_lossy().to_string())
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    ]
+                    .align_x(iced::Alignment::Center),
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+            }
             None => container(txt_str("Select a photo from the left menu to preview").size(14))
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -1001,7 +1102,6 @@ impl ExifApp {
                 .into(),
         };
 
-        // Root 3-Column Layout
         let content = row![
             explorer_panel,
             container(Space::new().width(1)).height(Length::Fill),
@@ -1023,6 +1123,79 @@ impl ExifApp {
             })
             .into()
     }
+}
+
+fn parse_xmp_tag(xmp: &str, tag_name: &str) -> String {
+    let raw_name = tag_name.split(':').last().unwrap_or(tag_name);
+
+    for open_pattern in &[format!("<{}", tag_name), format!("<{}", raw_name)] {
+        if let Some(start_idx) = xmp.find(open_pattern) {
+            if let Some(tag_close) = xmp[start_idx..].find('>') {
+                let content_start = start_idx + tag_close + 1;
+                for close_pattern in &[format!("</{}>", tag_name), format!("</{}>", raw_name)] {
+                    if let Some(end_offset) = xmp[content_start..].find(close_pattern) {
+                        let value = xmp[content_start..content_start + end_offset].trim();
+                        if !value.is_empty() && !value.contains('<') {
+                            return value.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for attr_pattern in &[format!("{}=", tag_name), format!("{}=", raw_name)] {
+        if let Some(start_idx) = xmp.find(attr_pattern) {
+            let rest = &xmp[start_idx + attr_pattern.len()..];
+            let quote_char = rest.chars().next().unwrap_or('"');
+            if quote_char == '"' || quote_char == '\'' {
+                let val_start = 1;
+                if let Some(val_end) = rest[val_start..].find(quote_char) {
+                    return rest[val_start..val_start + val_end].trim().to_string();
+                }
+            }
+        }
+    }
+
+    String::new()
+}
+
+fn parse_xmp_bag(xmp: &str, tag_name: &str) -> String {
+    let raw_name = tag_name.split(':').last().unwrap_or(tag_name);
+
+    let bag_start = [format!("<{}", tag_name), format!("<{}", raw_name)]
+        .iter()
+        .find_map(|p| xmp.find(p));
+
+    if let Some(start) = bag_start {
+        let sub_xmp = &xmp[start..];
+        let mut items = Vec::new();
+        let mut search_idx = 0;
+
+        while let Some(li_start) = sub_xmp[search_idx..].find("<rdf:li") {
+            let actual_start = search_idx + li_start;
+            if let Some(tag_close) = sub_xmp[actual_start..].find('>') {
+                let val_start = actual_start + tag_close + 1;
+                if let Some(li_end) = sub_xmp[val_start..].find("</rdf:li>") {
+                    let val = sub_xmp[val_start..val_start + li_end].trim();
+                    if !val.is_empty() {
+                        items.push(val);
+                    }
+                    search_idx = val_start + li_end;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if !items.is_empty() {
+            return items.join(", ");
+        }
+    }
+
+    String::new()
 }
 
 fn decimal_to_dms_rationals(decimal: f64) -> Vec<uR64> {
