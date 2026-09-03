@@ -38,7 +38,7 @@ const PNG_XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
 
 pub fn main() -> iced::Result {
     iced::application(ExifApp::default, ExifApp::update, ExifApp::view)
-        .title("EXIF + XMP Batch Editor (JPEG & PNG) v3.5")
+        .title("EXIF + XMP Batch Editor v3.5")
         .subscription(ExifApp::subscription)
         .theme(|_: &ExifApp| Theme::Dark)
         .font(LEXEND_REGULAR_BYTES)
