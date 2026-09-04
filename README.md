@@ -1,6 +1,19 @@
 # batch-exif
 Batch Exif Offline Editor in Rust/Iced
 
+### Quick Notes
+- There are basically 3 standards for photo metadata
+    - EXIF: oldest standard, near universal compatability, largely focused on camera settings
+    - IPTC: pretty much phased out, combined into XMP
+    - XMP: Adobe developed standard, can contain EXIF but usually kept separate for compatability
+- This program helps edit `.jpg` and `.png` images to add EXIF and common XMP data fields largely targeting genealogy
+- If multiple images are selected, only common metadata will be shown
+- If new metadata is input, it will be applied to all selected images
+- Any non-common fields between the images will remain the same
+
+### Demo
+![3.5](v3.5.png)
+
 ### Genealogical EXIF & Companion Metadata Reference
 
 | Variable | Description |
@@ -21,10 +34,6 @@ Batch Exif Offline Editor in Rust/Iced
 | **XMP-mwg-rs:Regions** | Bounding box coordinates used to identify and map specific facial regions. |
 | **IPTC:PersonInImage** | List of individual names corresponding to the people appearing in the photo. |
 | **IPTC:Credit / IPTC:Byline** | The photographer, original collector, or contributor who provided the photograph. |
-
-### Demo Images
-![Empty](v2.1-empty.png)
-![Selected](v2.1-selected.png)
 
 ### Arch Windows Cross Compilation
 ```bash
